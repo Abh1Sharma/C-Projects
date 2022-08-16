@@ -1,2 +1,2 @@
-# C-Projects
+# C++Projects
 Random Projects and Files
