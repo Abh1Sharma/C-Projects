@@ -1,0 +1,465 @@
+#include "m4.h"
+#include "m3.h"
+#include "m2.h"
+#include "m1.h"
+#include "commonGlobals.h"
+#include <algorithm>
+#include <queue>
+#include <list>
+#include <chrono>
+
+#define NO_EDGE -1
+#define IGNORE_TIME 99999
+#define inf 99999
+struct path_info
+{
+    std::vector<StreetSegmentIdx> path_to_pickup;
+    std::vector<StreetSegmentIdx> path_to_dropoff;
+
+    double time_to_pickup;
+    double time_to_dropoff;
+};
+
+struct total_path_info
+{
+    std::vector<CourierSubPath> optimalPath;
+};
+
+//std::vector<std::vector<path_info>> depot_matrix;
+std::vector<std::vector<std::pair<path_info, path_info>>> matrix;
+
+void bfsPathMulti(int srcID, const double turn_penalty, std::vector<IntersectionIdx> all_inter);
+
+// m3 stuff
+struct WaveElem
+{
+
+    IntersectionIdx nodeID;
+    StreetSegmentIdx edgeID;
+    double travelTime; // total travel time to reach node
+    double estTime;
+
+    WaveElem(int NodeID, int EdgeID, double Time, double estimate)
+    {
+        nodeID = NodeID;
+        edgeID = EdgeID;
+        travelTime = Time;
+        estTime = estimate;
+    }
+};
+
+struct Node
+{
+
+    std::vector<StreetSegmentIdx> outgoing_edges;
+    StreetSegmentIdx reachingEdge;
+    double bestTime = inf;
+};
+
+std::vector<StreetSegmentIdx> bfsTrace(int destID);
+std::vector<Node> node_vec;
+std::vector<CourierSubPath> findPathBasedOnStart(
+    const float turn_penalty,
+    const std::vector<DeliveryInf> &deliveries,
+    const std::vector<IntersectionIdx> &depots,
+    std::vector<bool> pickup_vec,
+    std::vector<bool> dropoff_vec,
+    double min_time, int starting_depot, int deli, std::vector<IntersectionIdx> all_inter);
+
+std::vector<StreetSegmentIdx> bfsTrace(IntersectionIdx destID)
+{
+
+    std::list<StreetSegmentIdx> path;
+
+    IntersectionIdx currNodeID = destID;
+    StreetSegmentIdx prevEdge = node_vec[currNodeID].reachingEdge;
+
+    while (prevEdge != NO_EDGE)
+    {
+
+        StreetSegmentInfo ss_info = getStreetSegmentInfo(prevEdge);
+
+        path.push_front(prevEdge);
+
+        if (ss_info.to == currNodeID)
+        {
+
+            currNodeID = ss_info.from;
+        }
+        else
+        {
+
+            currNodeID = ss_info.to;
+        }
+
+        prevEdge = node_vec[currNodeID].reachingEdge;
+    }
+
+    std::vector<StreetSegmentIdx> path_vec;
+    for (StreetSegmentIdx const &n : path)
+    {
+        path_vec.push_back(n);
+    }
+
+    return path_vec;
+}
+
+void bfsPathMulti(int srcID, const double turn_penalty, std::vector<IntersectionIdx> all_inter)
+{
+
+    node_vec.clear();
+    node_vec.resize(getNumIntersections());
+    auto cmp = [](WaveElem left, WaveElem right)
+    { return (node_vec[left.nodeID].bestTime) > (node_vec[right.nodeID].bestTime); };
+    std::priority_queue<WaveElem, std::vector<WaveElem>, decltype(cmp)> wavefront(cmp);
+
+    wavefront.push(WaveElem(srcID, NO_EDGE, 0, 0));
+    node_vec[srcID].bestTime = 0;
+  //  std::cout << " in bsf " << srcID << std::endl;
+    while (wavefront.size() != 0)
+    {
+    //    std::cout << wavefront.size() << std::endl;
+
+        WaveElem curr = wavefront.top();
+        wavefront.pop();
+
+        node_vec[curr.nodeID].outgoing_edges = findStreetSegmentsOfIntersection(curr.nodeID);
+
+
+
+
+        all_inter.erase(std::remove(all_inter.begin(), all_inter.end(), curr.nodeID), all_inter.end());
+
+        if (all_inter.size() == 0){
+            //std::cout << "breaking when vector becomes empty " << std::endl;
+            break;
+        }
+
+        std::vector<StreetSegmentIdx> edge_list = node_vec[curr.nodeID].outgoing_edges;
+        StreetSegmentInfo out_ss_info;
+        StreetSegmentInfo in_ss_info;
+
+        if (node_vec[curr.nodeID].reachingEdge != NO_EDGE)
+        {
+
+            in_ss_info = getStreetSegmentInfo(node_vec[curr.nodeID].reachingEdge);
+        }
+
+        IntersectionIdx toNodeID;
+
+        for (int i = 0; i < edge_list.size(); i++)
+        {
+
+            out_ss_info = getStreetSegmentInfo(edge_list[i]);
+
+            if (curr.nodeID == out_ss_info.to && out_ss_info.oneWay == true)
+            {
+
+                continue;
+            }
+            else if (curr.nodeID == out_ss_info.from)
+            {
+
+                toNodeID = out_ss_info.to;
+            }
+            else
+            {
+
+                toNodeID = out_ss_info.from;
+            }
+
+            double time = findStreetSegmentTravelTime(edge_list[i]);
+            bool explored = true;
+            if(node_vec[toNodeID].bestTime == inf)
+                explored = false;
+            if (node_vec[curr.nodeID].reachingEdge != NO_EDGE && (in_ss_info.streetID != out_ss_info.streetID))
+            { // this assumes that there is always a turn penalty at the beginning...
+
+                time = time + turn_penalty;
+            }
+            if(node_vec[curr.nodeID].bestTime + time < node_vec[toNodeID].bestTime)
+            {
+                node_vec[toNodeID].bestTime = node_vec[curr.nodeID].bestTime + time;
+                node_vec[toNodeID].reachingEdge = edge_list[i];
+            } 
+//            std::cout << explored << "  best time " << node_vec[toNodeID].bestTime <<  " new time " << node_vec[curr.nodeID].bestTime + time << std::endl;
+            if(explored == false)
+                wavefront.push(WaveElem(toNodeID, edge_list[i], node_vec[curr.nodeID].bestTime + time, 0));
+        }
+    }
+    //std::cout << "reached end " << std::endl;
+}
+
+
+
+std::vector<CourierSubPath> travelingCourier(
+    const float turn_penalty,
+    const std::vector<DeliveryInf> &deliveries,
+    const std::vector<IntersectionIdx> &depots)
+{
+
+    // Clearing, resizing global vectors to start fresh
+  
+    matrix.clear();
+ 
+    matrix.resize(deliveries.size());
+
+    std::vector<bool> pickup_vec(deliveries.size(), false);
+    std::vector<bool> dropoff_vec(deliveries.size(), false);
+    
+    std::vector<IntersectionIdx> all_intersections;
+
+    pickup_vec.resize(deliveries.size());
+    dropoff_vec.resize(deliveries.size());
+
+    for (int i = 0; i < deliveries.size(); i++){
+            
+        all_intersections.push_back(deliveries[i].pickUp);
+        all_intersections.push_back(deliveries[i].dropOff);
+
+    }
+    // finding the min depot to construct the depot matrix
+    //std::chrono::steady_clock::time_point begin = std::chrono::steady_clock::now();
+   // std::cout << "staart time " <<start <<std::endl;
+            
+    // constructing matrix
+    for (int i = 0; i < deliveries.size(); i++)
+    {
+
+        bfsPathMulti(deliveries[i].pickUp, turn_penalty, all_intersections);
+
+        for (int j = 0; j < deliveries.size(); j++)
+        {
+
+            std::pair<path_info, path_info> tmp; // first is from the pickup, second is from the dropoff
+
+            tmp.first.time_to_pickup = node_vec[deliveries[j].pickUp].bestTime;
+            tmp.first.time_to_dropoff = node_vec[deliveries[j].dropOff].bestTime;
+
+            matrix[i].push_back(tmp);
+        }
+
+        bfsPathMulti(deliveries[i].dropOff, turn_penalty, all_intersections);
+
+        for (int j = 0; j < deliveries.size(); j++)
+        {
+            matrix[i][j].second.time_to_pickup = node_vec[deliveries[j].pickUp].bestTime;
+            matrix[i][j].second.time_to_dropoff = node_vec[deliveries[j].dropOff].bestTime;
+        }
+        
+    }
+    //std::chrono::steady_clock::time_point end = std::chrono::steady_clock::now();
+    //std::cout << std::chrono::duration_cast<std::chrono::microseconds>(end - begin).count() << "[µs]" << std::endl;
+
+//int timetaken = 
+    double min_time = IGNORE_TIME;
+
+   
+    // Finding min time from the first depot to the first pickup location
+     int starting_depot = 0; // set the starting depot
+    int closest_pickup = 0;
+   
+    //make sure current depot is fine:
+    for(int i = 0; i < depots.size(); i++){
+        std::vector<StreetSegmentIdx> curr_path_depot = findPathBetweenIntersections(turn_penalty, {depots[starting_depot], deliveries[closest_pickup].pickUp});
+        if(curr_path_depot.size() > 0){
+            break;
+        }
+        else{
+            starting_depot++;
+        }
+    } 
+   
+    // For now, pass in starting depot as zero, and deli as the closest intersection
+    /*double shortest_distance = 100000000;
+    for (int i = 0; i < deliveries.size(); i++)
+    {
+        LatLon initial_depot_loc = getIntersectionPosition(depots[starting_depot]);
+        LatLon intersection_location = getIntersectionPosition(deliveries[i].pickUp);
+        std::pair<LatLon, LatLon> points(initial_depot_loc, intersection_location);
+
+        double distance = findDistanceBetweenTwoPoints(points);
+
+        if (distance < shortest_distance)
+        {
+
+            shortest_distance = distance;
+            closest_pickup = i;
+        }
+    }  */
+
+    
+    
+    return findPathBasedOnStart(turn_penalty, deliveries, depots, pickup_vec, dropoff_vec, min_time, starting_depot, closest_pickup, all_intersections);
+    
+}
+
+
+
+std::vector<CourierSubPath> findPathBasedOnStart(
+    const float turn_penalty,
+    const std::vector<DeliveryInf> &deliveries,
+    const std::vector<IntersectionIdx> &depots,
+    std::vector<bool> pickup_vec,
+    std::vector<bool> dropoff_vec,
+    double min_time, int starting_depot, int deli, std::vector<IntersectionIdx> all_inter)
+{
+    
+    std::vector<CourierSubPath> optimalPath;
+    int next_deli;
+    bool pickup;
+    bool prev_pickup;
+    int ending_depot;
+    CourierSubPath tmp_path;
+
+    // Assigning the first set of intersections for the Courier path
+    tmp_path.start_intersection = depots[starting_depot];
+    tmp_path.end_intersection = deliveries[deli].pickUp;
+
+  //  tmp_path.subpath = depot_matrix[starting_depot][deli].path_to_pickup;
+    pickup_vec[deli] = true; // package picked up
+    pickup = true;           // is deli a pickup or dropoff?
+
+    optimalPath.push_back(tmp_path);
+
+    // Proceeding to create the middle of the path
+    //  Looping through every other delivery except the first pickup and the final depot intersection
+    for (int totalLoc = 0; totalLoc < 2 * deliveries.size() - 1; totalLoc++)
+    { // should maybe change this
+
+        min_time = IGNORE_TIME;
+        tmp_path.subpath.clear();
+
+        if (pickup == true)
+        {
+
+            tmp_path.start_intersection = deliveries[deli].pickUp;
+            prev_pickup = true;
+        }
+        else if (pickup == false)
+        {
+
+            tmp_path.start_intersection = deliveries[deli].dropOff;
+            prev_pickup = false;
+        }
+
+        for (int i = 0; i < matrix[deli].size(); i++)
+        {
+
+            if (prev_pickup)
+            {
+
+                if (min_time > matrix[deli][i].first.time_to_pickup && pickup_vec[i] == false)
+                {
+
+                    min_time = matrix[deli][i].first.time_to_pickup;
+                    pickup = true;
+                    next_deli = i;
+                }
+
+                if (min_time > matrix[deli][i].first.time_to_dropoff && pickup_vec[i] == true && dropoff_vec[i] == false)
+                {
+
+                    min_time = matrix[deli][i].first.time_to_dropoff;
+                    pickup = false;
+                    next_deli = i;
+                }
+            }
+            else
+            {
+
+                if (min_time > matrix[deli][i].second.time_to_pickup && pickup_vec[i] == false)
+                {
+
+                    min_time = matrix[deli][i].second.time_to_pickup;
+                    pickup = true;
+                    next_deli = i;
+                }
+
+                if (min_time > matrix[deli][i].second.time_to_dropoff && pickup_vec[i] == true && dropoff_vec[i] == false)
+                {
+
+                    min_time = matrix[deli][i].second.time_to_dropoff;
+                    pickup = false;
+                    next_deli = i;
+                }
+            }
+        }
+
+        if (pickup)
+        {
+
+            tmp_path.end_intersection = deliveries[next_deli].pickUp;
+            pickup_vec[next_deli] = true;
+
+            if (prev_pickup)
+            {
+
+                tmp_path.subpath = matrix[deli][next_deli].first.path_to_pickup;
+            }
+            else
+            {
+
+                tmp_path.subpath = matrix[deli][next_deli].second.path_to_pickup;
+            }
+        }
+        else
+        {
+
+            tmp_path.end_intersection = deliveries[next_deli].dropOff;
+            dropoff_vec[next_deli] = true;
+
+            if (prev_pickup)
+            {
+
+                tmp_path.subpath = matrix[deli][next_deli].first.path_to_dropoff;
+            }
+            else
+            {
+
+                tmp_path.subpath = matrix[deli][next_deli].second.path_to_dropoff;
+            }
+        }
+
+        deli = next_deli;
+        
+        if(tmp_path.end_intersection != tmp_path.start_intersection){
+           optimalPath.push_back(tmp_path); 
+        }
+    }
+
+    // from the latest intersection, finding now the closest remaining depot
+    min_time = IGNORE_TIME;
+    bfsPathMulti(deliveries[deli].dropOff, turn_penalty, depots);
+    for (int i = 0; i < depots.size(); i++)
+    {
+        if (min_time > node_vec[depots[i]].bestTime)
+        {
+
+            min_time = node_vec[depots[i]].bestTime;
+            ending_depot = i;
+        }
+    }
+
+    // Assigning the ending dropOff, and ending depot
+    tmp_path.start_intersection = deliveries[deli].dropOff;
+    tmp_path.end_intersection = depots[ending_depot];
+//    std::cout << "reached here " << std::endl;
+//    std::vector<StreetSegmentIdx> pathlol = bfsTrace(depots[ending_depot]);
+//    std::cout << "after trace " << std::endl;
+//
+//    tmp_path.subpath.clear();
+//    tmp_path.subpath.resize(pathlol.size());
+
+//    tmp_path.subpath = pathlol;
+
+    optimalPath.push_back(tmp_path);
+
+    for (int i = 0; i < optimalPath.size(); i++)
+    {
+        // Assigning all the distances based on the intersections at hand
+        optimalPath.at(i).subpath = findPathBetweenIntersections(turn_penalty, std::make_pair(optimalPath[i].start_intersection, optimalPath[i].end_intersection));
+    }
+
+    return optimalPath;
+}
